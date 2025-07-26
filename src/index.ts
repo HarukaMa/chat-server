@@ -100,6 +100,7 @@ export class DO extends DurableObject<Env> {
         }
         session.authenticated = true
         session.name = msg.token
+        this.broadcast({ type: "user_join", name: session.name })
         break
       case "send_message":
         if (!session.authenticated) {
