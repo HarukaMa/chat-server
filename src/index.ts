@@ -67,7 +67,9 @@ export class DO extends DurableObject<Env> {
   }
 
   get_user_list() {
-    return Array.from(this.sessions.values(), (s) => s.name).filter(Boolean)
+    return Array.from(this.sessions.values(), (s) => s.name)
+      .filter(Boolean)
+      .sort()
   }
 
   async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer) {
