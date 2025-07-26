@@ -1,7 +1,7 @@
 import { DurableObject } from "cloudflare:workers"
 
 export type WSMessageType =
-  | { type: "new_message"; message: string }
+  | { type: "new_message"; name: string; message: string }
   | { type: "user_join"; name: string }
   | { type: "user_leave"; name: string }
   | { type: "user_list"; users: string[] }
@@ -114,7 +114,7 @@ export class DO extends DurableObject<Env> {
           ws.close(1007, "invalid message content")
           return
         }
-        this.broadcast({ type: "new_message", message: msg.message })
+        this.broadcast({ type: "new_message", name: session.name, message: msg.message })
         break
       default:
         ws.close(1007, "invalid message type")
