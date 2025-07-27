@@ -44,6 +44,7 @@ export class DO extends DurableObject<Env> {
       const session = ws.deserializeAttachment()
       this.sessions.set(ws, session)
     })
+    this.ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair("PING", "PONG"))
   }
 
   async fetch(request: Request): Promise<Response> {
