@@ -41,13 +41,13 @@ export type TwitchEmotesServer = {
     {
       id: string
       name: string
-      template: string
       format: ["static" | "animated"]
       scale: ["1.0" | "2.0" | "3.0"]
       theme_mode: ["light" | "dark"]
       [key: string]: unknown
     },
   ]
+  template: string
 }
 
 /**
@@ -226,10 +226,10 @@ export class DO extends DurableObject<Env> {
     })
     console.log("Fetched Twitch emotes")
     const json = await response.json<TwitchEmotesServer>()
+    const template = json.template
     const emote_data: TwitchEmotes = []
     for (const data of json.data) {
       const id = data.id
-      const template = data.template
       let format = "static"
       if (data.format.includes("animated")) {
         format = "animated"
