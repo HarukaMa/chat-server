@@ -4,7 +4,7 @@
  */
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "chat-server",
+  "name": "test-chat-server",
   "main": "src/index.ts",
   "compatibility_date": "2025-07-23",
   "migrations": [
