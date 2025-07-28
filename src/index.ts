@@ -3,13 +3,13 @@
 import { DurableObject, env } from "cloudflare:workers"
 
 export type WSMessageType =
-  | { type: "new_message"; name: string; message: string }
+  | { type: "new_message"; name: string; message: string; timestamp_ms: number }
   | { type: "user_join"; name: string }
   | { type: "user_leave"; name: string }
-  | { type: "user_list"; users: string[] }
+  | { type: "user_list"; users?: string[] }
   | { type: "authenticate"; token: string }
   | { type: "send_message"; message: string }
-  | { type: "message_history" }
+  | { type: "message_history"; messages?: [{ name: string; message: string; timestamp_ms: number }] }
 
 export type Session = {
   authenticated: boolean
@@ -176,13 +176,16 @@ export class DO extends DurableObject<Env> {
           ws.close(1007, "invalid message content")
           return
         }
+        if (session.authenticated) {
+          return
+        }
         session.authenticated = true
         session.name = msg.token
         ws.serializeAttachment(session)
         this.broadcast({ type: "user_join", name: session.name })
         break
 
-      case "send_message":
+      case "send_message": {
         if (!session.authenticated) {
           ws.close(1007, "unauthenticated")
           return
@@ -191,13 +194,15 @@ export class DO extends DurableObject<Env> {
           ws.close(1007, "invalid message content")
           return
         }
+        const now = Date.now()
         this.ctx.storage.sql.exec(
           `INSERT INTO messages (name, message, timestamp_ms)
            VALUES (?, ?, ?)`,
-          ...[session.name, msg.message, Date.now()],
+          ...[session.name, msg.message, now],
         )
-        this.broadcast({ type: "new_message", name: session.name, message: msg.message })
+        this.broadcast({ type: "new_message", name: session.name, message: msg.message, timestamp_ms: now })
         break
+      }
 
       case "message_history": {
         if (session.history_requested) {
@@ -210,7 +215,7 @@ export class DO extends DurableObject<Env> {
            FROM messages
            ORDER BY timestamp_ms`,
         )
-        
+
         ws.send(JSON.stringify({ type: "message_history", messages: messages.toArray() }))
         break
       }
