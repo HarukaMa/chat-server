@@ -194,7 +194,7 @@ export class DO extends DurableObject<Env> {
         this.ctx.storage.sql.exec(
           `INSERT INTO messages (name, message, timestamp_ms)
            VALUES (?, ?, ?)`,
-          [session.name, msg.message, Date.now()],
+          ...[session.name, msg.message, Date.now()],
         )
         this.broadcast({ type: "new_message", name: session.name, message: msg.message })
         break
