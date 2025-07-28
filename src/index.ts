@@ -123,6 +123,13 @@ export class DO extends DurableObject<Env> {
       return
     }
 
+    try {
+      JSON.parse(message)
+    } catch (e) {
+      console.log("ERROR: invalid message: ", e)
+      ws.close(1007, "invalid message content")
+      return
+    }
     const msg = JSON.parse(message) as WSMessageType
     switch (msg.type) {
       case "new_message":
