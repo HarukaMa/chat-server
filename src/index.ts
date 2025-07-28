@@ -84,7 +84,7 @@ export class DO extends DurableObject<Env> {
     this.ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair("PING", "PONG"))
   }
 
-  async websocket(): Promise<Response> {
+  async fetch(_request: Request): Promise<Response> {
     const webSocketPair = new WebSocketPair()
     const [client, server] = Object.values(webSocketPair)
     this.ctx.acceptWebSocket(server)
@@ -280,7 +280,7 @@ export default {
           status: 426,
         })
       }
-      return stub.websocket()
+      return stub.fetch(request)
     } else if (url.pathname === "/twitch_emotes") {
       return stub.twitch_emotes()
     }
