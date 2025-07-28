@@ -1,4 +1,4 @@
-import { DurableObject } from "cloudflare:workers"
+import { DurableObject, env } from "cloudflare:workers"
 
 export type WSMessageType =
   | { type: "new_message"; name: string; message: string }
@@ -11,6 +11,43 @@ export type WSMessageType =
 export type Session = {
   authenticated: boolean
   name: string
+}
+
+export type TwitchTokenServer = {
+  access_token: string
+  expires_in: number
+  token_type: string
+}
+
+export type TwitchToken = {
+  access_token: string
+  expires_at: number
+}
+
+export type TwitchEmote = {
+  name: string
+  images: {
+    url_1x: string | null
+    url_2x: string | null
+    url_4x: string | null
+  }
+  animated: boolean
+}
+
+export type TwitchEmotes = Array<TwitchEmote>
+
+export type TwitchEmotesServer = {
+  data: [
+    {
+      id: string
+      name: string
+      template: string
+      format: ["static" | "animated"]
+      scale: ["1.0" | "2.0" | "3.0"]
+      theme_mode: ["light" | "dark"]
+      [key: string]: unknown
+    },
+  ]
 }
 
 /**
@@ -47,7 +84,7 @@ export class DO extends DurableObject<Env> {
     this.ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair("PING", "PONG"))
   }
 
-  async fetch(request: Request): Promise<Response> {
+  async websocket(): Promise<Response> {
     const webSocketPair = new WebSocketPair()
     const [client, server] = Object.values(webSocketPair)
     this.ctx.acceptWebSocket(server)
@@ -139,6 +176,85 @@ export class DO extends DurableObject<Env> {
     console.log("WebSocket error", error)
     ws.close(1006, "error")
   }
+
+  async twitch_emotes(): Promise<Response> {
+    let emote_data = await this.ctx.storage.get<TwitchEmotes>("emote_data")
+
+    if (emote_data === undefined) {
+      console.log("No emote data found, fetching from Twitch")
+      let twitch_token = await this.ctx.storage.get<TwitchToken>("twitch_token")
+      const now = Date.now() / 1000
+      if (twitch_token === undefined || twitch_token.expires_at < now) {
+        console.log("No valid Twitch token found, authenticating")
+        twitch_token = await this.twitch_auth()
+      }
+
+      emote_data = await this.twitch_fetch_emotes(twitch_token)
+    }
+    return new Response(JSON.stringify(emote_data), { headers: { "Content-Type": "application/json" } })
+  }
+
+  async twitch_auth(): Promise<TwitchToken> {
+    const response = await fetch("https://id.twitch.tv/oauth2/token", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      body: new URLSearchParams({
+        client_id: env.TWITCH_CLIENT_ID,
+        client_secret: env.TWITCH_CLIENT_SECRET,
+        grant_type: "client_credentials",
+      }),
+    })
+    console.log("Authenticated with Twitch")
+    const json = await response.json<TwitchTokenServer>()
+    const twitch_token = {
+      access_token: json.access_token,
+      expires_at: Date.now() / 1000 + json.expires_in,
+    }
+    await this.ctx.storage.put("twitch_token", twitch_token)
+    console.log("Stored Twitch token")
+    return twitch_token
+  }
+
+  async twitch_fetch_emotes(twitch_token: TwitchToken): Promise<TwitchEmotes> {
+    const response = await fetch("https://api.twitch.tv/helix/chat/emotes?broadcaster_id=85498365", {
+      headers: {
+        "Client-Id": env.TWITCH_CLIENT_ID,
+        Authorization: `Bearer ${twitch_token.access_token}`,
+      },
+    })
+    console.log("Fetched Twitch emotes")
+    const json = await response.json<TwitchEmotesServer>()
+    const emote_data: TwitchEmotes = []
+    for (const data of json.data) {
+      const id = data.id
+      const template = data.template
+      let format = "static"
+      if (data.format.includes("animated")) {
+        format = "animated"
+      }
+      let theme_mode = "light"
+      if (!data.theme_mode.includes("light")) {
+        theme_mode = "dark"
+      }
+      const scale = data.scale
+      const base_url = template.replace("{{id}}", id).replace("{{format}}", format).replace("{{theme_mode}}", theme_mode)
+      const emote: TwitchEmote = {
+        name: data.name,
+        animated: format === "animated",
+        images: {
+          url_1x: scale.includes("1.0") ? base_url.replace("{{scale}}", "1.0") : null,
+          url_2x: scale.includes("2.0") ? base_url.replace("{{scale}}", "2.0") : null,
+          url_4x: scale.includes("3.0") ? base_url.replace("{{scale}}", "3.0") : null,
+        },
+      }
+      emote_data.push(emote)
+    }
+    await this.ctx.storage.put("emote_data", emote_data)
+    console.log("Stored Twitch emotes")
+    return emote_data
+  }
 }
 
 export default {
@@ -147,11 +263,13 @@ export default {
    *
    * @param request - The request submitted to the Worker from the client
    * @param env - The interface to reference bindings declared in wrangler.jsonc
-   * @param ctx - The execution context of the Worker
+   * @param _ctx - The execution context of the Worker
    * @returns The response to be sent back to the client
    */
-  async fetch(request, env, ctx): Promise<Response> {
+  async fetch(request, env, _ctx): Promise<Response> {
     const url = new URL(request.url)
+    const id = env.DO.idFromName("chat")
+    const stub = env.DO.get(id)
 
     if (url.pathname === "/auth") {
       return new Response(null, { status: 501 })
@@ -162,9 +280,9 @@ export default {
           status: 426,
         })
       }
-      const id = env.DO.idFromName("chat")
-      const stub = env.DO.get(id)
-      return stub.fetch(request)
+      return stub.websocket()
+    } else if (url.pathname === "/twitch_emotes") {
+      return stub.twitch_emotes()
     }
 
     return new Response(
