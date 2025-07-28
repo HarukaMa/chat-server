@@ -210,7 +210,8 @@ export class DO extends DurableObject<Env> {
            FROM messages
            ORDER BY timestamp_ms`,
         )
-        ws.send(JSON.stringify({ type: "message_history", messages }))
+        
+        ws.send(JSON.stringify({ type: "message_history", messages: messages.toArray() }))
         break
       }
 
