@@ -1,3 +1,5 @@
+// noinspection SqlNoDataSourceInspection
+
 import { DurableObject, env } from "cloudflare:workers"
 
 export type WSMessageType =
@@ -7,10 +9,12 @@ export type WSMessageType =
   | { type: "user_list"; users: string[] }
   | { type: "authenticate"; token: string }
   | { type: "send_message"; message: string }
+  | { type: "message_history" }
 
 export type Session = {
   authenticated: boolean
   name: string
+  history_requested: boolean
 }
 
 export type TwitchTokenServer = {
@@ -82,13 +86,20 @@ export class DO extends DurableObject<Env> {
       this.sessions.set(ws, session)
     })
     this.ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair("PING", "PONG"))
+
+    this.init_database()
+    this.ctx.storage.getAlarm().then((alarm_time) => {
+      if (alarm_time === null) {
+        this.ctx.storage.setAlarm(Date.now() + 3600 * 1000).catch((e) => console.error(e))
+      }
+    })
   }
 
   async fetch(_request: Request): Promise<Response> {
     const webSocketPair = new WebSocketPair()
     const [client, server] = Object.values(webSocketPair)
     this.ctx.acceptWebSocket(server)
-    const session: Session = { authenticated: false, name: "" }
+    const session: Session = { authenticated: false, name: "", history_requested: false }
     server.serializeAttachment(session)
     this.sessions.set(server, session)
 
@@ -98,13 +109,31 @@ export class DO extends DurableObject<Env> {
     })
   }
 
+  private init_database() {
+    const cursor = this.ctx.storage.sql.exec(`PRAGMA table_list`)
+    if ([...cursor].find((t) => t.name === "messages")) {
+      console.log("Table already exists")
+      return
+    }
+
+    this.ctx.storage.sql.exec(
+      `CREATE TABLE messages ( \
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        message TEXT NOT NULL,
+        timestamp_ms INTEGER NOT NULL
+      )`,
+    )
+    this.ctx.storage.sql.exec(`CREATE INDEX idx_timestamp ON messages (timestamp_ms DESC)`)
+  }
+
   broadcast(message: WSMessageType) {
     this.ctx.getWebSockets().forEach((ws) => {
       ws.send(JSON.stringify(message))
     })
   }
 
-  get_user_list() {
+  private get_user_list() {
     return Array.from(this.sessions.values(), (s) => s.name)
       .filter(Boolean)
       .sort()
@@ -137,9 +166,11 @@ export class DO extends DurableObject<Env> {
       case "user_leave":
         ws.close(1007, "invalid message type")
         return
+
       case "user_list":
         ws.send(JSON.stringify({ type: "user_list", users: this.get_user_list() }))
         break
+
       case "authenticate":
         if (!("token" in msg)) {
           ws.close(1007, "invalid message content")
@@ -150,6 +181,7 @@ export class DO extends DurableObject<Env> {
         ws.serializeAttachment(session)
         this.broadcast({ type: "user_join", name: session.name })
         break
+
       case "send_message":
         if (!session.authenticated) {
           ws.close(1007, "unauthenticated")
@@ -159,8 +191,29 @@ export class DO extends DurableObject<Env> {
           ws.close(1007, "invalid message content")
           return
         }
+        this.ctx.storage.sql.exec(
+          `INSERT INTO messages (name, message, timestamp_ms)
+           VALUES (?, ?, ?)`,
+          [session.name, msg.message, Date.now()],
+        )
         this.broadcast({ type: "new_message", name: session.name, message: msg.message })
         break
+
+      case "message_history": {
+        if (session.history_requested) {
+          return
+        }
+        session.history_requested = true
+        ws.serializeAttachment(session)
+        const messages = this.ctx.storage.sql.exec(
+          `SELECT name, message, timestamp_ms
+           FROM messages
+           ORDER BY timestamp_ms`,
+        )
+        ws.send(JSON.stringify({ type: "message_history", messages }))
+        break
+      }
+
       default:
         ws.close(1007, "invalid message type")
         return
@@ -201,7 +254,7 @@ export class DO extends DurableObject<Env> {
     return new Response(JSON.stringify(emote_data), { headers: { "Content-Type": "application/json" } })
   }
 
-  async twitch_auth(): Promise<TwitchToken> {
+  private async twitch_auth(): Promise<TwitchToken> {
     const response = await fetch("https://id.twitch.tv/oauth2/token", {
       method: "POST",
       headers: {
@@ -224,7 +277,7 @@ export class DO extends DurableObject<Env> {
     return twitch_token
   }
 
-  async twitch_fetch_emotes(twitch_token: TwitchToken): Promise<TwitchEmotes> {
+  private async twitch_fetch_emotes(twitch_token: TwitchToken): Promise<TwitchEmotes> {
     const response = await fetch("https://api.twitch.tv/helix/chat/emotes?broadcaster_id=85498365", {
       headers: {
         "Client-Id": env.TWITCH_CLIENT_ID,
@@ -261,6 +314,15 @@ export class DO extends DurableObject<Env> {
     await this.ctx.storage.put("emote_data", emote_data)
     console.log("Stored Twitch emotes")
     return emote_data
+  }
+
+  alarm(_alarmInfo?: AlarmInvocationInfo): void | Promise<void> {
+    this.ctx.storage.sql.exec(
+      `DELETE
+       FROM messages
+       WHERE timestamp_ms < ${Date.now() - 86400 * 1000 * 3}`,
+    )
+    this.ctx.storage.setAlarm(Date.now() + 3600 * 1000).catch((e) => console.error(e))
   }
 }
 
