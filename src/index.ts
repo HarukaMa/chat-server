@@ -333,6 +333,10 @@ export class DO extends DurableObject<Env> {
         refresh_token: twitch_token.refresh_token,
       }),
     })
+    if (!response.ok) {
+      console.error("ERROR: Twitch user token refresh failed:", await response.text())
+      throw new Error("Error refreshing Twitch user token")
+    }
     const json = await response.json<TwitchUserTokenServer>()
     return {
       access_token: json.access_token,
@@ -348,6 +352,10 @@ export class DO extends DurableObject<Env> {
         Authorization: `Bearer ${twitch_token.access_token}`,
       },
     })
+    if (!response.ok) {
+      console.error("ERROR: Twitch user name fetch failed:", await response.text())
+      throw new Error("Error fetching Twitch user name")
+    }
     const json = await response.json<TwitchUserServer>()
     console.log(json)
     return json.data[0].display_name
@@ -429,6 +437,10 @@ export class DO extends DurableObject<Env> {
           redirect_uri: "https://chat.sw.arm.fm/twitch_auth",
         }),
       })
+      if (!response.ok) {
+        console.error("ERROR: Twitch user auth failed:", await response.text())
+        return new Response("Error authenticating with Twitch", { status: 500 })
+      }
       const json = await response.json<TwitchUserTokenServer>()
       const twitch_token: TwitchUserToken = {
         access_token: json.access_token,
