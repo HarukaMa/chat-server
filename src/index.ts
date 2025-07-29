@@ -349,6 +349,7 @@ export class DO extends DurableObject<Env> {
       },
     })
     const json = await response.json<TwitchUserServer>()
+    console.log(json)
     return json.data[0].display_name
   }
 
