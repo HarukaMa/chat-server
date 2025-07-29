@@ -344,6 +344,7 @@ export class DO extends DurableObject<Env> {
   private async twitch_get_user_name(twitch_token: TwitchUserToken): Promise<string> {
     const response = await fetch("https://api.twitch.tv/helix/users", {
       headers: {
+        "Client-Id": env.TWITCH_CLIENT_ID,
         Authorization: `Bearer ${twitch_token.access_token}`,
       },
     })
