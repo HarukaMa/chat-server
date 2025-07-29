@@ -7,9 +7,10 @@ export type WSMessageType =
   | { type: "user_join"; name: string }
   | { type: "user_leave"; name: string }
   | { type: "user_list"; users?: string[] }
-  | { type: "authenticate"; token: string }
+  | { type: "authenticate"; session: string }
   | { type: "send_message"; message: string }
   | { type: "message_history"; messages?: [{ name: string; message: string; timestamp_ms: number }] }
+  | { type: "error"; message: string }
 
 export type Session = {
   authenticated: boolean
@@ -26,6 +27,23 @@ export type TwitchTokenServer = {
 export type TwitchToken = {
   access_token: string
   expires_at: number
+}
+
+export type TwitchUserTokenServer = {
+  access_token: string
+  expires_in: number
+  refresh_token: string
+  token_type: string
+}
+
+export type TwitchUserToken = {
+  access_token: string
+  expires_at: number
+  refresh_token: string
+}
+
+export type TwitchUserServer = {
+  data: [{ display_name: string }]
 }
 
 export type TwitchEmote = {
@@ -148,14 +166,14 @@ export class DO extends DurableObject<Env> {
     const session = this.sessions.get(ws)
     if (session === undefined) {
       ws.close(1011, "invalid internal state")
-      console.log("ERROR: session not found for existing connection")
+      console.error("ERROR: session not found for existing connection")
       return
     }
 
     try {
       JSON.parse(message)
     } catch (e) {
-      console.log("ERROR: invalid message: ", e)
+      console.error("ERROR: invalid message: ", e)
       ws.close(1007, "invalid message content")
       return
     }
@@ -171,19 +189,37 @@ export class DO extends DurableObject<Env> {
         ws.send(JSON.stringify({ type: "user_list", users: this.get_user_list() }))
         break
 
-      case "authenticate":
-        if (!("token" in msg)) {
+      case "authenticate": {
+        if (!("session" in msg)) {
           ws.close(1007, "invalid message content")
           return
         }
         if (session.authenticated) {
+          ws.send(JSON.stringify({ type: "error", message: "Already authenticated" }))
           return
         }
+        let token = await this.ctx.storage.get<TwitchUserToken>(`twitch_user_token_${msg.session}`)
+        if (token === undefined) {
+          ws.send(JSON.stringify({ type: "error", message: "Twitch account not linked" }))
+          return
+        }
+        if (token.expires_at < Date.now() / 1000) {
+          try {
+            token = await this.twitch_refresh_user_token(token)
+            await this.ctx.storage.put(`twitch_user_token_${msg.session}`, token)
+          } catch (e) {
+            console.error("ERROR: failed to refresh token: ", e)
+            ws.send(JSON.stringify({ type: "error", message: "Failed to authenticate with twitch" }))
+            await this.ctx.storage.delete(`twitch_user_token_${msg.session}`)
+            return
+          }
+        }
+        session.name = await this.twitch_get_user_name(token)
         session.authenticated = true
-        session.name = msg.token
         ws.serializeAttachment(session)
         this.broadcast({ type: "user_join", name: session.name })
         break
+      }
 
       case "send_message": {
         if (!session.authenticated) {
@@ -206,6 +242,7 @@ export class DO extends DurableObject<Env> {
 
       case "message_history": {
         if (session.history_requested) {
+          ws.send(JSON.stringify({ type: "error", message: "History already requested" }))
           return
         }
         session.history_requested = true
@@ -283,6 +320,37 @@ export class DO extends DurableObject<Env> {
     return twitch_token
   }
 
+  private async twitch_refresh_user_token(twitch_token: TwitchUserToken): Promise<TwitchUserToken> {
+    const response = await fetch("https://id.twitch.tv/oauth2/token", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      body: new URLSearchParams({
+        client_id: env.TWITCH_CLIENT_ID,
+        client_secret: env.TWITCH_CLIENT_SECRET,
+        grant_type: "refresh_token",
+        refresh_token: twitch_token.refresh_token,
+      }),
+    })
+    const json = await response.json<TwitchUserTokenServer>()
+    return {
+      access_token: json.access_token,
+      expires_at: Date.now() / 1000 + json.expires_in,
+      refresh_token: json.refresh_token,
+    }
+  }
+
+  private async twitch_get_user_name(twitch_token: TwitchUserToken): Promise<string> {
+    const response = await fetch("https://api.twitch.tv/helix/users", {
+      headers: {
+        Authorization: `Bearer ${twitch_token.access_token}`,
+      },
+    })
+    const json = await response.json<TwitchUserServer>()
+    return json.data[0].display_name
+  }
+
   private async twitch_fetch_emotes(twitch_token: TwitchToken): Promise<TwitchEmotes> {
     const response = await fetch("https://api.twitch.tv/helix/chat/emotes?broadcaster_id=85498365", {
       headers: {
@@ -322,6 +390,69 @@ export class DO extends DurableObject<Env> {
     return emote_data
   }
 
+  private get_player_session(request: Request) {
+    const cookies = request.headers.get("cookie") || ""
+    let session: string | undefined
+    cookies.split(";").forEach((cookie) => {
+      const [key, value] = cookie.trim().split("=")
+      if (key === "swarm_fm_player_session") {
+        session = value
+      }
+    })
+    return session
+  }
+
+  async twitch_user_auth(request: Request): Promise<Response> {
+    const session = this.get_player_session(request)
+    if (session === undefined) {
+      return new Response("Player session not found", { status: 400 })
+    }
+
+    const url = new URL(request.url)
+    const authorization_code = url.searchParams.get("code")
+    if (authorization_code === null) {
+      return new Response("Authorization code not found", { status: 400 })
+    }
+    try {
+      const response = await fetch("https://id.twitch.tv/oauth2/token", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+        },
+        body: new URLSearchParams({
+          client_id: env.TWITCH_CLIENT_ID,
+          client_secret: env.TWITCH_CLIENT_SECRET,
+          code: authorization_code,
+          grant_type: "authorization_code",
+          redirect_uri: "https://chat.sw.arm.fm/twitch_auth",
+        }),
+      })
+      const json = await response.json<TwitchUserTokenServer>()
+      const twitch_token: TwitchUserToken = {
+        access_token: json.access_token,
+        expires_at: Date.now() / 1000 + json.expires_in,
+        refresh_token: json.refresh_token,
+      }
+      await this.ctx.storage.put(`twitch_user_token_${session}`, twitch_token)
+      return Response.redirect(env.PLAYER_URL, 303)
+    } catch (e) {
+      console.error(e)
+      return new Response("Error authenticating with Twitch", { status: 500 })
+    }
+  }
+
+  async twitch_session_check(request: Request): Promise<Response> {
+    const session = this.get_player_session(request)
+    if (session === undefined) {
+      return new Response("Player session not found", { status: 400 })
+    }
+    const twitch_token = await this.ctx.storage.get<TwitchUserToken>(`twitch_user_token_${session}`)
+    return new Response(JSON.stringify(twitch_token !== undefined), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    })
+  }
+
   alarm(_alarmInfo?: AlarmInvocationInfo): void | Promise<void> {
     this.ctx.storage.sql.exec(
       `DELETE
@@ -346,8 +477,8 @@ export default {
     const id = env.DO.idFromName("chat")
     const stub = env.DO.get(id)
 
-    if (url.pathname === "/auth") {
-      return new Response(null, { status: 501 })
+    if (url.pathname === "/twitch_auth") {
+      return stub.twitch_user_auth(request)
     } else if (url.pathname === "/chat") {
       const upgradeHeader = request.headers.get("Upgrade")
       if (!upgradeHeader || upgradeHeader !== "websocket") {
@@ -358,6 +489,8 @@ export default {
       return stub.fetch(request)
     } else if (url.pathname === "/twitch_emotes") {
       return stub.twitch_emotes()
+    } else if (url.pathname === "/twitch_session_check") {
+      return stub.twitch_session_check(request)
     }
 
     return new Response(

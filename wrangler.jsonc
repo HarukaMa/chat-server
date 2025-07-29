@@ -45,7 +45,8 @@
    * https://developers.cloudflare.com/workers/wrangler/configuration/#environment-variables
    */
   "vars": {
-    "TWITCH_CLIENT_ID": "ijg6o5dv2nq9j6g4tcm6mx3p25twbz"
+    "TWITCH_CLIENT_ID": "ijg6o5dv2nq9j6g4tcm6mx3p25twbz",
+    "PLAYER_URL": "https://player.sw.arm.fm"
   }
   /**
    * Note: Use secrets to store sensitive data.
